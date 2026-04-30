@@ -16,7 +16,15 @@ const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null;
 
 const app = express();
 app.use(cors({ origin: "*" }));
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req: any, _res, buf) => {
+      if (req.originalUrl === "/stripe/webhook") {
+        req.rawBody = buf;
+      }
+    },
+  })
+);
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -1029,3 +1037,60 @@ start().catch(async (error) => {
   await pool.end();
   process.exit(1);
 });
+
+
+
+/* ================= STRIPE WEBHOOK ================= */
+
+app.post("/stripe/webhook", async (req: any, res) => {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.log("[stripe-webhook] missing secret");
+    return res.status(500).send("Webhook secret missing");
+  }
+
+  const signature = req.headers["stripe-signature"];
+
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.rawBody,
+      signature,
+      webhookSecret
+    );
+  } catch (err: any) {
+    console.log("[stripe-webhook] signature error", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    if (event.type === "payment_intent.succeeded") {
+      const paymentIntent = event.data.object;
+      const jobId = paymentIntent.metadata?.jobId;
+
+      if (jobId) {
+        await markJobPaid(jobId);
+        console.log("? Job marked paid via webhook:", jobId);
+      }
+    }
+
+    if (event.type === "payment_intent.payment_failed") {
+      const paymentIntent = event.data.object;
+      const jobId = paymentIntent.metadata?.jobId;
+
+      if (jobId) {
+        console.log("? Payment failed for job:", jobId);
+      }
+    }
+
+    res.json({ received: true });
+  } catch (err: any) {
+    console.log("[stripe-webhook] handler error", err.message);
+    res.status(500).send("Webhook handler error");
+  }
+});
+
+/* ================================================== */
+

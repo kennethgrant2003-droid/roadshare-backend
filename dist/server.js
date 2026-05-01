@@ -15,16 +15,12 @@ const db_1 = require("./db");
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY || "";
+const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET || "";
+console.log("STRIPE_SECRET_KEY:", stripeSecretKey ? "FOUND" : "MISSING");
+console.log("STRIPE_WEBHOOK_SECRET:", stripeWebhookSecret ? "FOUND" : "MISSING");
 const stripe = stripeSecretKey ? new stripe_1.default(stripeSecretKey) : null;
 const app = (0, express_1.default)();
 app.use((0, cors_1.default)({ origin: "*" }));
-app.use(express_1.default.json({
-    verify: (req, _res, buf) => {
-        if (req.originalUrl === "/stripe/webhook") {
-            req.rawBody = buf;
-        }
-    },
-}));
 const server = http_1.default.createServer(app);
 const io = new socket_io_1.Server(server, {
     cors: {
@@ -255,8 +251,72 @@ async function markJobPaid(jobId) {
         }
     }
 }
+app.post("/stripe/webhook", express_1.default.raw({ type: "application/json" }), async (req, res) => {
+    if (!stripe) {
+        console.log("[stripe-webhook] Stripe missing");
+        return res.status(500).send("Stripe missing");
+    }
+    if (!stripeWebhookSecret) {
+        console.log("[stripe-webhook] STRIPE_WEBHOOK_SECRET missing");
+        return res.status(500).send("Webhook secret missing");
+    }
+    const signature = req.headers["stripe-signature"];
+    let event;
+    try {
+        event = stripe.webhooks.constructEvent(req.body, signature, stripeWebhookSecret);
+    }
+    catch (error) {
+        console.log("[stripe-webhook] signature failed:", error.message);
+        return res.status(400).send(`Webhook Error: ${error.message}`);
+    }
+    try {
+        console.log("[stripe-webhook] received:", event.type);
+        if (event.type === "payment_intent.succeeded") {
+            const paymentIntent = event.data.object;
+            const jobId = paymentIntent.metadata?.jobId;
+            if (jobId) {
+                await markJobPaid(jobId);
+                console.log("[stripe-webhook] marked paid:", jobId);
+            }
+            else {
+                console.log("[stripe-webhook] payment_intent.succeeded missing metadata.jobId");
+            }
+        }
+        if (event.type === "payment_intent.payment_failed") {
+            const paymentIntent = event.data.object;
+            const jobId = paymentIntent.metadata?.jobId;
+            if (jobId) {
+                await (0, db_1.query)(`
+            UPDATE jobs
+            SET payment_status = 'failed', updated_at = NOW()
+            WHERE id = $1
+          `, [jobId]);
+                const updated = await getJob(jobId);
+                if (updated) {
+                    const payload = await buildJobPayload(updated);
+                    io.to(updated.customer_socket_id).emit("job:payment_updated", payload);
+                    if (updated.helper_socket_id) {
+                        io.to(updated.helper_socket_id).emit("job:payment_updated", payload);
+                    }
+                }
+                console.log("[stripe-webhook] marked failed:", jobId);
+            }
+        }
+        return res.json({ received: true });
+    }
+    catch (error) {
+        console.log("[stripe-webhook] handler failed:", error.message);
+        return res.status(500).json({ ok: false, error: error.message });
+    }
+});
+app.use(express_1.default.json());
 app.get("/health", (_req, res) => {
-    res.json({ ok: true, db: "postgres" });
+    res.json({
+        ok: true,
+        db: "postgres",
+        stripe: stripe ? "configured" : "missing",
+        webhook: stripeWebhookSecret ? "configured" : "missing",
+    });
 });
 app.post("/helpers/register", async (req, res) => {
     try {
@@ -268,7 +328,9 @@ app.post("/helpers/register", async (req, res) => {
             });
         }
         const normalizedEmail = String(email).toLowerCase().trim();
-        const existing = await (0, db_1.one)(`SELECT id FROM helper_accounts WHERE email = $1`, [normalizedEmail]);
+        const existing = await (0, db_1.one)(`SELECT id FROM helper_accounts WHERE email = $1`, [
+            normalizedEmail,
+        ]);
         if (existing) {
             return res.status(400).json({
                 ok: false,
@@ -282,14 +344,7 @@ app.post("/helpers/register", async (req, res) => {
           id, email, password_hash, name, phone, vehicle_type, bio, created_at, updated_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, '', NOW(), NOW())
-      `, [
-            helperId,
-            normalizedEmail,
-            passwordHash,
-            name,
-            phone || "",
-            vehicleType || "",
-        ]);
+      `, [helperId, normalizedEmail, passwordHash, name, phone || "", vehicleType || ""]);
         return res.json({
             ok: true,
             helper: {
@@ -314,13 +369,9 @@ app.post("/helpers/register", async (req, res) => {
 app.post("/helpers/login", async (req, res) => {
     try {
         const { email, password } = req.body;
-        if (!email || !password) {
-            return res.status(400).json({
-                ok: false,
-                error: "email and password are required",
-            });
-        }
-        const helper = await (0, db_1.one)(`SELECT * FROM helper_accounts WHERE email = $1`, [String(email).toLowerCase().trim()]);
+        const helper = await (0, db_1.one)(`SELECT * FROM helper_accounts WHERE email = $1`, [
+            String(email || "").toLowerCase().trim(),
+        ]);
         if (!helper) {
             return res.status(400).json({
                 ok: false,
@@ -388,35 +439,6 @@ app.get("/helpers/:helperId/profile", async (req, res) => {
         });
     }
 });
-app.post("/helpers/:helperId/profile", async (req, res) => {
-    try {
-        const { helperId } = req.params;
-        const { name, phone, vehicleType, bio } = req.body;
-        await (0, db_1.query)(`
-        UPDATE helper_accounts
-        SET
-          name = COALESCE($1, name),
-          phone = COALESCE($2, phone),
-          vehicle_type = COALESCE($3, vehicle_type),
-          bio = COALESCE($4, bio),
-          updated_at = NOW()
-        WHERE id = $5
-      `, [
-            name ?? null,
-            phone ?? null,
-            vehicleType ?? null,
-            bio ?? null,
-            helperId,
-        ]);
-        return res.json({ ok: true });
-    }
-    catch (error) {
-        return res.status(500).json({
-            ok: false,
-            error: error.message || "Failed to update profile",
-        });
-    }
-});
 app.post("/ratings/submit", async (req, res) => {
     try {
         const { jobId, helperId, rating, review } = req.body;
@@ -427,12 +449,6 @@ app.post("/ratings/submit", async (req, res) => {
             });
         }
         const numericRating = Number(rating);
-        if (numericRating < 1 || numericRating > 5) {
-            return res.status(400).json({
-                ok: false,
-                error: "rating must be between 1 and 5",
-            });
-        }
         await (0, db_1.query)(`
         INSERT INTO helper_ratings (job_id, helper_id, rating, review, created_at)
         VALUES ($1, $2, $3, $4, NOW())
@@ -454,6 +470,13 @@ app.post("/ratings/submit", async (req, res) => {
 });
 app.post("/payments/create-intent", async (req, res) => {
     try {
+        if (!stripe) {
+            return res.status(500).json({
+                ok: false,
+                error: "Stripe is not configured on the backend. Check STRIPE_SECRET_KEY in Render.",
+                stripeEnabled: false,
+            });
+        }
         const { jobId } = req.body;
         if (!jobId) {
             return res.status(400).json({ ok: false, error: "jobId is required" });
@@ -461,17 +484,6 @@ app.post("/payments/create-intent", async (req, res) => {
         const job = await getJob(jobId);
         if (!job) {
             return res.status(404).json({ ok: false, error: "Job not found" });
-        }
-        if (!stripe) {
-            await markJobPaid(jobId);
-            const updated = await getJob(jobId);
-            return res.json({
-                ok: true,
-                bypassed: true,
-                stripeEnabled: false,
-                quoteCents: updated?.quote_cents ?? job.quote_cents,
-                paymentStatus: "paid",
-            });
         }
         const paymentIntent = await stripe.paymentIntents.create({
             amount: Number(job.quote_cents),
@@ -487,8 +499,10 @@ app.post("/payments/create-intent", async (req, res) => {
         SET payment_status = 'pending', stripe_payment_intent_id = $1, updated_at = NOW()
         WHERE id = $2
       `, [paymentIntent.id, jobId]);
+        console.log("[stripe] created payment intent:", paymentIntent.id, "job:", jobId);
         return res.json({
             ok: true,
+            stripeEnabled: true,
             clientSecret: paymentIntent.client_secret,
             paymentIntentId: paymentIntent.id,
             quoteCents: Number(job.quote_cents),
@@ -505,6 +519,12 @@ app.post("/payments/create-intent", async (req, res) => {
 });
 app.post("/payments/confirm", async (req, res) => {
     try {
+        if (!stripe) {
+            return res.status(500).json({
+                ok: false,
+                error: "Stripe is not configured on the backend.",
+            });
+        }
         const { jobId, paymentIntentId } = req.body;
         if (!jobId) {
             return res.status(400).json({ ok: false, error: "jobId is required" });
@@ -512,15 +532,6 @@ app.post("/payments/confirm", async (req, res) => {
         const job = await getJob(jobId);
         if (!job) {
             return res.status(404).json({ ok: false, error: "Job not found" });
-        }
-        if (!stripe) {
-            await markJobPaid(jobId);
-            const updated = await getJob(jobId);
-            return res.json({
-                ok: true,
-                paymentStatus: "paid",
-                job: updated ? await buildJobPayload(updated) : null,
-            });
         }
         const intentId = paymentIntentId || job.stripe_payment_intent_id;
         if (!intentId) {
@@ -812,43 +823,3 @@ start().catch(async (error) => {
     await db_1.pool.end();
     process.exit(1);
 });
-/* ================= STRIPE WEBHOOK ================= */
-app.post("/stripe/webhook", async (req, res) => {
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-    if (!webhookSecret) {
-        console.log("[stripe-webhook] missing secret");
-        return res.status(500).send("Webhook secret missing");
-    }
-    const signature = req.headers["stripe-signature"];
-    let event;
-    try {
-        event = stripe.webhooks.constructEvent(req.rawBody, signature, webhookSecret);
-    }
-    catch (err) {
-        console.log("[stripe-webhook] signature error", err.message);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-    try {
-        if (event.type === "payment_intent.succeeded") {
-            const paymentIntent = event.data.object;
-            const jobId = paymentIntent.metadata?.jobId;
-            if (jobId) {
-                await markJobPaid(jobId);
-                console.log("? Job marked paid via webhook:", jobId);
-            }
-        }
-        if (event.type === "payment_intent.payment_failed") {
-            const paymentIntent = event.data.object;
-            const jobId = paymentIntent.metadata?.jobId;
-            if (jobId) {
-                console.log("? Payment failed for job:", jobId);
-            }
-        }
-        res.json({ received: true });
-    }
-    catch (err) {
-        console.log("[stripe-webhook] handler error", err.message);
-        res.status(500).send("Webhook handler error");
-    }
-});
-/* ================================================== */

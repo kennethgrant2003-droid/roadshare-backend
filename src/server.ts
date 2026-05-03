@@ -586,6 +586,86 @@ app.post("/ratings/submit", async (req, res) => {
   }
 });
 
+app.post("/payments/create-intent", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({
+        ok: false,
+        error: "Stripe is not configured on the backend. Check STRIPE_SECRET_KEY in Render.",
+        stripeEnabled: false,
+      });
+    }
+
+    const { jobId } = req.body;
+
+    if (!jobId) {
+      return res.status(400).json({ ok: false, error: "jobId is required" });
+    }
+
+    const job = await getJob(jobId);
+
+    if (!job) {
+      return res.status(404).json({ ok: false, error: "Job not found" });
+    }
+
+    const helperStripeAccountId = process.env.DEFAULT_HELPER_STRIPE_ACCOUNT_ID || "";
+
+    if (!helperStripeAccountId) {
+      return res.status(500).json({
+        ok: false,
+        error: "Missing DEFAULT_HELPER_STRIPE_ACCOUNT_ID in Render.",
+      });
+    }
+
+    const amount = Number(job.quote_cents);
+    const platformFeeAmount = Math.round(amount * 0.60);
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount,
+      currency: "usd",
+      automatic_payment_methods: { enabled: true },
+      application_fee_amount: platformFeeAmount,
+      transfer_data: {
+        destination: helperStripeAccountId,
+      },
+      metadata: {
+        jobId: job.id,
+        helperId: job.helper_id || "",
+        serviceType: job.service_type,
+        split: "company_60_contractor_40",
+      },
+    });
+
+    await query(
+      `
+        UPDATE jobs
+        SET payment_status = 'pending', stripe_payment_intent_id = $1, updated_at = NOW()
+        WHERE id = $2
+      `,
+      [paymentIntent.id, jobId]
+    );
+
+    console.log("[stripe-connect] created split payment intent:", paymentIntent.id);
+
+    return res.json({
+      ok: true,
+      stripeEnabled: true,
+      splitEnabled: true,
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      quoteCents: amount,
+      companyCents: platformFeeAmount,
+      contractorCents: amount - platformFeeAmount,
+      paymentStatus: "pending",
+    });
+  } catch (error: any) {
+    log("stripe connect create-intent error", error);
+    return res.status(500).json({
+      ok: false,
+      error: error.message || "Failed to create split payment intent",
+    });
+  }
+});
 app.post("/payments/confirm", async (req, res) => {
   try {
     const { jobId, paymentIntentId } = req.body;
@@ -975,5 +1055,6 @@ start().catch(async (error) => {
   await pool.end();
   process.exit(1);
 });
+
 
 

@@ -1,5 +1,4 @@
-import "dotenv/config";
-import { Pool } from "pg";
+﻿import { Pool } from "pg";
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -9,23 +8,29 @@ if (!connectionString) {
 
 export const pool = new Pool({
   connectionString,
-  ssl:
-    process.env.NODE_ENV === "production"
-      ? { rejectUnauthorized: false }
-      : false,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
-export async function query<T = any>(text: string, params: any[] = []) {
-  const result = await pool.query<T>(text, params);
-  return result;
+export async function query(text: string, params?: any[]) {
+  const start = Date.now();
+
+  try {
+    const result = await pool.query(text, params);
+    const duration = Date.now() - start;
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[db] query completed", { duration, rows: result.rowCount });
+    }
+
+    return result;
+  } catch (error) {
+    console.error("[db] query failed:", error);
+    throw error;
+  }
 }
 
-export async function one<T = any>(text: string, params: any[] = []) {
-  const result = await query<T>(text, params);
-  return result.rows[0] || null;
-}
-
-export async function many<T = any>(text: string, params: any[] = []) {
-  const result = await query<T>(text, params);
-  return result.rows;
+export async function closeDb() {
+  await pool.end();
 }

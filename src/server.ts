@@ -19,9 +19,14 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, app: "RoadShare API" });
 });
 
+// API routes
 app.use("/api/stripe", stripeRoutes);
 app.use("/api/helpers", helperRoutes);
 app.use("/api/tracking", trackingRoutes);
+
+// Mobile fallback routes because app is calling /helpers/...
+app.use("/helpers", helperRoutes);
+app.use("/tracking", trackingRoutes);
 
 app.get("/", (_req, res) => {
   res.send("🚗 RoadShare backend is running");

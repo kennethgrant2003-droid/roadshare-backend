@@ -52,7 +52,7 @@ async function createHelper(req: express.Request, res: express.Response) {
     }
 
     const existing = await query(
-      `SELECT * FROM helpers WHERE email = $1 LIMIT 1`,
+      `SELECT * FROM helpers WHERE LOWER(email) = LOWER($1) LIMIT 1`,
       [email]
     );
 
@@ -113,11 +113,47 @@ async function createHelper(req: express.Request, res: express.Response) {
   }
 }
 
-// Route aliases so your mobile app stops getting 404
 router.post("/create", createHelper);
 router.post("/signup", createHelper);
 router.post("/register", createHelper);
 router.post("/", createHelper);
+
+router.post("/login", async (req, res) => {
+  try {
+    await ensureHelperColumns();
+
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
+
+    const result = await query(
+      `
+      SELECT id, name, email, phone, profile_photo_url, stripe_account_id, stripe_onboarding_complete
+      FROM helpers
+      WHERE LOWER(email) = LOWER($1)
+      AND password = $2
+      LIMIT 1
+      `,
+      [email, password]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    res.json({
+      ok: true,
+      helper: result.rows[0],
+      helperId: result.rows[0].id,
+      stripeAccountId: result.rows[0].stripe_account_id,
+    });
+  } catch (err: any) {
+    console.error("Helper login failed:", err);
+    res.status(500).json({ error: err.message || "Helper login failed" });
+  }
+});
 
 router.get("/", async (_req, res) => {
   try {
@@ -142,10 +178,7 @@ router.post("/:helperId/stripe/onboard", async (req, res) => {
     const { helperId } = req.params;
     const { email } = req.body;
 
-    const helperResult = await query(
-      `SELECT * FROM helpers WHERE id = $1`,
-      [helperId]
-    );
+    const helperResult = await query(`SELECT * FROM helpers WHERE id = $1`, [helperId]);
 
     if (helperResult.rowCount === 0) {
       return res.status(404).json({ error: "Helper not found" });
@@ -171,10 +204,10 @@ router.post("/:helperId/stripe/onboard", async (req, res) => {
 
       stripeAccountId = account.id;
 
-      await query(
-        `UPDATE helpers SET stripe_account_id = $1 WHERE id = $2`,
-        [stripeAccountId, helperId]
-      );
+      await query(`UPDATE helpers SET stripe_account_id = $1 WHERE id = $2`, [
+        stripeAccountId,
+        helperId,
+      ]);
     }
 
     const accountLink = await stripe.accountLinks.create({
@@ -201,10 +234,7 @@ router.get("/:helperId/stripe/status", async (req, res) => {
 
     const { helperId } = req.params;
 
-    const helperResult = await query(
-      `SELECT * FROM helpers WHERE id = $1`,
-      [helperId]
-    );
+    const helperResult = await query(`SELECT * FROM helpers WHERE id = $1`, [helperId]);
 
     if (helperResult.rowCount === 0) {
       return res.status(404).json({ error: "Helper not found" });
@@ -225,10 +255,10 @@ router.get("/:helperId/stripe/status", async (req, res) => {
     const account = await stripe.accounts.retrieve(helper.stripe_account_id);
     const complete = Boolean(account.charges_enabled && account.payouts_enabled);
 
-    await query(
-      `UPDATE helpers SET stripe_onboarding_complete = $1 WHERE id = $2`,
-      [complete, helperId]
-    );
+    await query(`UPDATE helpers SET stripe_onboarding_complete = $1 WHERE id = $2`, [
+      complete,
+      helperId,
+    ]);
 
     res.json({
       ok: true,

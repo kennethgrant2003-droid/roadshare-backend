@@ -19,23 +19,12 @@ cloudinary.config({
 });
 
 async function ensureHelperColumns() {
-  await query(`
-    CREATE TABLE IF NOT EXISTS helpers (
-      id BIGSERIAL PRIMARY KEY,
-      name TEXT,
-      email TEXT,
-      phone TEXT,
-      password TEXT,
-      profile_photo_url TEXT,
-      stripe_account_id TEXT,
-      stripe_onboarding_complete BOOLEAN DEFAULT FALSE,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
-
+  await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS name TEXT`);
   await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS email TEXT`);
   await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS phone TEXT`);
   await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS password TEXT`);
+  await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS vehicle_type TEXT`);
+  await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS socket_id TEXT`);
   await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS profile_photo_url TEXT`);
   await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS stripe_account_id TEXT`);
   await query(`ALTER TABLE helpers ADD COLUMN IF NOT EXISTS stripe_onboarding_complete BOOLEAN DEFAULT FALSE`);
@@ -45,10 +34,10 @@ async function createHelper(req: express.Request, res: express.Response) {
   try {
     await ensureHelperColumns();
 
-    const { name, email, phone, password } = req.body;
+    const { name, email, phone, password, vehicleType } = req.body;
 
-    if (!name || !email) {
-      return res.status(400).json({ error: "Name and email are required" });
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: "Name, email, and password are required" });
     }
 
     const existing = await query(
@@ -66,13 +55,17 @@ async function createHelper(req: express.Request, res: express.Response) {
       });
     }
 
+    const socketId = `pending_${Date.now()}`;
+
     const helperResult = await query(
       `
-      INSERT INTO helpers (name, email, phone, password)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO helpers
+        (name, email, phone, password, vehicle_type, socket_id)
+      VALUES
+        ($1, $2, $3, $4, $5, $6)
       RETURNING *
       `,
-      [name, email, phone || "", password || ""]
+      [name, email, phone || "", password, vehicleType || "", socketId]
     );
 
     const helper = helperResult.rows[0];
@@ -124,13 +117,9 @@ router.post("/login", async (req, res) => {
 
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password are required" });
-    }
-
     const result = await query(
       `
-      SELECT id, name, email, phone, profile_photo_url, stripe_account_id, stripe_onboarding_complete
+      SELECT *
       FROM helpers
       WHERE LOWER(email) = LOWER($1)
       AND password = $2
@@ -160,7 +149,7 @@ router.get("/", async (_req, res) => {
     await ensureHelperColumns();
 
     const result = await query(`
-      SELECT id, name, email, phone, profile_photo_url, stripe_account_id, stripe_onboarding_complete
+      SELECT *
       FROM helpers
       ORDER BY id DESC
     `);
@@ -204,10 +193,10 @@ router.post("/:helperId/stripe/onboard", async (req, res) => {
 
       stripeAccountId = account.id;
 
-      await query(`UPDATE helpers SET stripe_account_id = $1 WHERE id = $2`, [
-        stripeAccountId,
-        helperId,
-      ]);
+      await query(
+        `UPDATE helpers SET stripe_account_id = $1 WHERE id = $2`,
+        [stripeAccountId, helperId]
+      );
     }
 
     const accountLink = await stripe.accountLinks.create({
@@ -255,10 +244,10 @@ router.get("/:helperId/stripe/status", async (req, res) => {
     const account = await stripe.accounts.retrieve(helper.stripe_account_id);
     const complete = Boolean(account.charges_enabled && account.payouts_enabled);
 
-    await query(`UPDATE helpers SET stripe_onboarding_complete = $1 WHERE id = $2`, [
-      complete,
-      helperId,
-    ]);
+    await query(
+      `UPDATE helpers SET stripe_onboarding_complete = $1 WHERE id = $2`,
+      [complete, helperId]
+    );
 
     res.json({
       ok: true,

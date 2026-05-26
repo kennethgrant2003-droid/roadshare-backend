@@ -2,9 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.pool = void 0;
 exports.query = query;
-exports.one = one;
-exports.many = many;
-require("dotenv/config");
+exports.closeDb = closeDb;
 const pg_1 = require("pg");
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -12,19 +10,25 @@ if (!connectionString) {
 }
 exports.pool = new pg_1.Pool({
     connectionString,
-    ssl: process.env.NODE_ENV === "production"
-        ? { rejectUnauthorized: false }
-        : false,
+    ssl: {
+        rejectUnauthorized: false,
+    },
 });
-async function query(text, params = []) {
-    const result = await exports.pool.query(text, params);
-    return result;
+async function query(text, params) {
+    const start = Date.now();
+    try {
+        const result = await exports.pool.query(text, params);
+        const duration = Date.now() - start;
+        if (process.env.NODE_ENV !== "production") {
+            console.log("[db] query completed", { duration, rows: result.rowCount });
+        }
+        return result;
+    }
+    catch (error) {
+        console.error("[db] query failed:", error);
+        throw error;
+    }
 }
-async function one(text, params = []) {
-    const result = await query(text, params);
-    return result.rows[0] || null;
-}
-async function many(text, params = []) {
-    const result = await query(text, params);
-    return result.rows;
+async function closeDb() {
+    await exports.pool.end();
 }

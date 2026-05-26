@@ -1,4 +1,4 @@
-﻿import express from "express";
+import express from "express";
 import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
 import Stripe from "stripe";
@@ -201,8 +201,8 @@ router.post("/:helperId/stripe/onboard", async (req, res) => {
 
     const accountLink = await stripe.accountLinks.create({
       account: stripeAccountId,
-      refresh_url: "https://roadshare-backend.onrender.com/health",
-      return_url: "https://roadshare-backend.onrender.com/health",
+      refresh_url: "roadshare://helper-dashboard",
+      return_url: "roadshare://helper-dashboard",
       type: "account_onboarding",
     });
 
@@ -321,3 +321,5 @@ router.post("/:helperId/profile-picture", upload.single("profilePicture"), async
 });
 
 export default router;
+
+

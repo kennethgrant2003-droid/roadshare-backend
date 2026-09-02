@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import http from "http";
 import { Server } from "socket.io";
+
 import stripeRoutes from "./routes/stripe";
 import helperRoutes from "./routes/helpers";
 import trackingRoutes from "./routes/tracking";
@@ -17,19 +18,69 @@ const io = new Server(server, {
   },
 });
 
-const activeJobs = new Map<string, any>();
+type RoadShareJob = {
+  id: string;
+  jobId: string;
 
-app.use("/api/stripe/webhook", express.raw({ type: "application/json" }));
+  serviceType: string;
+  vehicleType: string;
+  note: string;
+
+  customerName: string;
+  customerLocation: {
+    latitude?: number;
+    longitude?: number;
+    address?: string;
+  } | null;
+
+  customerAddress: string;
+
+  status: string;
+  paymentStatus: string;
+
+  quoteCents: number;
+
+  helperProfile?: {
+    helperId?: string;
+    name?: string;
+    phone?: string;
+    vehicle?: string;
+  };
+
+  etaMinutes?: number;
+
+  createdAt: string;
+  updatedAt?: string;
+};
+
+const activeJobs = new Map<string, RoadShareJob>();
+
+/* =========================================================
+   EXPRESS
+========================================================= */
+
+app.use(
+  "/api/stripe/webhook",
+  express.raw({
+    type: "application/json",
+  })
+);
+
 app.use(cors());
 app.use(express.json());
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, app: "RoadShare API" });
+  res.json({
+    ok: true,
+    app: "RoadShare API",
+  });
 });
 
 app.use("/api/stripe", stripeRoutes);
+
 app.use("/api/helpers", helperRoutes);
 app.use("/api/tracking", trackingRoutes);
+
 app.use("/helpers", helperRoutes);
 app.use("/tracking", trackingRoutes);
 
@@ -38,8 +89,15 @@ app.get("/stripe/onboarding-return", (_req, res) => {
     <html>
       <body style="font-family: Arial; padding: 30px;">
         <h2>Returning to RoadShare...</h2>
-        <script>window.location.href = "roadshare://helper-dashboard";</script>
-        <a href="roadshare://helper-dashboard">Tap here to return to RoadShare</a>
+
+        <script>
+          window.location.href =
+            "roadshare://helper-dashboard";
+        </script>
+
+        <a href="roadshare://helper-dashboard">
+          Tap here to return to RoadShare
+        </a>
       </body>
     </html>
   `);
@@ -49,167 +107,557 @@ app.get("/", (_req, res) => {
   res.send("RoadShare backend is running");
 });
 
+/* =========================================================
+   SOCKET.IO
+========================================================= */
+
 io.on("connection", (socket) => {
-  console.log("Socket connected:", socket.id);
+  console.log(
+    "[RoadShare Socket] connected:",
+    socket.id
+  );
 
-  socket.on("user:join", (payload, callback) => {
-    const role = payload?.role || "unknown";
-    const jobId = payload?.jobId;
+  /* =======================================================
+     USER JOIN
+  ======================================================= */
 
-    socket.join(role);
+  socket.on(
+    "user:join",
+    (
+      payload: any,
+      callback?: (response: any) => void
+    ) => {
+      const role =
+        String(payload?.role || "unknown")
+          .trim()
+          .toLowerCase();
 
-    if (jobId) {
-      socket.join(`job:${jobId}`);
+      const userId =
+        payload?.userId
+          ? String(payload.userId)
+          : undefined;
+
+      const jobId =
+        payload?.jobId
+          ? String(payload.jobId)
+          : undefined;
+
+      socket.join(role);
+
+      if (userId) {
+        socket.join(`user:${userId}`);
+      }
+
+      if (jobId) {
+        socket.join(`job:${jobId}`);
+      }
+
+      console.log("[RoadShare Socket] user:join", {
+        socketId: socket.id,
+        role,
+        userId,
+        jobId,
+      });
+
+      callback?.({
+        ok: true,
+        socketId: socket.id,
+        role,
+        userId,
+        jobId,
+      });
+
+      /*
+       * A helper who comes online should immediately
+       * receive all currently-searching RoadShare jobs.
+       */
+      if (role === "helper") {
+        const jobs =
+          Array.from(activeJobs.values()).filter(
+            (job) => job.status === "searching"
+          );
+
+        jobs.forEach((job) => {
+          socket.emit(
+            "job:available",
+            job
+          );
+        });
+      }
     }
+  );
 
-    console.log("user:join", { socketId: socket.id, role, jobId });
+  /* =======================================================
+     JOB ROOM JOIN / LEAVE
+  ======================================================= */
 
-    callback?.({ ok: true, socketId: socket.id, role, jobId });
+  socket.on(
+    "job:join",
+    (
+      payload: any,
+      callback?: (response: any) => void
+    ) => {
+      const jobId =
+        payload?.jobId
+          ? String(payload.jobId)
+          : "";
 
-    if (role === "helper") {
-      const jobs = Array.from(activeJobs.values()).filter(
-        (job) => job.status === "searching"
+      if (!jobId) {
+        callback?.({
+          ok: false,
+          error: "jobId required",
+        });
+
+        return;
+      }
+
+      socket.join(`job:${jobId}`);
+
+      console.log(
+        "[RoadShare Socket] joined room:",
+        `job:${jobId}`
       );
 
-      jobs.forEach((job) => {
-        socket.emit("job:available", job);
+      callback?.({
+        ok: true,
+        jobId,
       });
     }
-  });
+  );
 
-  socket.on("job:create", (payload, callback) => {
-    const jobId = `job_${Date.now()}`;
+  socket.on(
+    "job:leave",
+    (payload: any) => {
+      const jobId =
+        payload?.jobId
+          ? String(payload.jobId)
+          : "";
 
-    const job = {
-      id: jobId,
-      jobId,
-      serviceType: payload?.serviceType || "Roadside Assistance",
-      vehicleType: payload?.vehicleType || "",
-      note: payload?.note || "",
-      customerName: payload?.customerName || "Customer",
-      customerLocation: payload?.location || payload?.customerLocation || null,
-      customerAddress: payload?.location?.address || payload?.customerAddress || "Current Location",
-      status: "searching",
-      paymentStatus: "unpaid",
-      quoteCents: payload?.quoteCents || 6500,
-      createdAt: new Date().toISOString(),
-    };
+      if (!jobId) return;
 
-    activeJobs.set(jobId, job);
+      socket.leave(`job:${jobId}`);
 
-    socket.join("customer");
-    socket.join(`job:${jobId}`);
-
-    console.log("job:create", job);
-
-    io.to("helper").emit("job:available", job);
-    io.emit("job:available_debug", job);
-
-    socket.emit("job:created", job);
-
-    callback?.({
-      ok: true,
-      id: jobId,
-      jobId,
-      job,
-    });
-  });
-
-  socket.on("job:accept", (payload, callback) => {
-    const jobId = payload?.jobId;
-
-    if (!jobId) {
-      callback?.({ ok: false, error: "jobId required" });
-      return;
+      console.log(
+        "[RoadShare Socket] left room:",
+        `job:${jobId}`
+      );
     }
+  );
 
-    const existing = activeJobs.get(jobId) || {};
+  /* =======================================================
+     CREATE JOB
+  ======================================================= */
 
-    const acceptedJob = {
-      ...existing,
-      id: jobId,
-      jobId,
-      status: "accepted",
-      paymentStatus: existing.paymentStatus || "unpaid",
-      helperProfile: {
-        helperId: payload?.helperId || "7",
-        name: payload?.helperName || "RoadShare Helper",
-        phone: payload?.helperPhone || "",
-      },
-      etaMinutes: payload?.etaMinutes || 8,
-    };
+  socket.on(
+    "job:create",
+    (
+      payload: any,
+      callback?: (response: any) => void
+    ) => {
+      const jobId =
+        `job_${Date.now()}`;
 
-    activeJobs.set(jobId, acceptedJob);
+      const quoteCents =
+        Number(payload?.quoteCents);
 
-    socket.join("helper");
-    socket.join(`job:${jobId}`);
+      const customerLocation =
+        payload?.location ||
+        payload?.customerLocation ||
+        null;
 
-    console.log("job:accept", acceptedJob);
+      const job: RoadShareJob = {
+        id: jobId,
+        jobId,
 
-    io.to(`job:${jobId}`).emit("job:accepted", acceptedJob);
-    io.emit("job:accepted_debug", acceptedJob);
+        serviceType:
+          payload?.serviceType ||
+          "Roadside Assistance",
 
-    callback?.({ ok: true, job: acceptedJob });
-  });
+        vehicleType:
+          payload?.vehicleType || "",
 
-  socket.on("location:update", (payload) => {
-    console.log("location:update", payload);
-    const jobId = payload?.jobId;
-    if (!jobId) return;
+        note:
+          payload?.note || "",
 
-    const update = {
-      jobId,
-      helperLocation: {
-        latitude: payload.latitude,
-        longitude: payload.longitude,
-      },
-      heading: payload.heading || 0,
-      updatedAt: new Date().toISOString(),
-    };
+        customerName:
+          payload?.customerName ||
+          "Customer",
 
-    io.to(`job:${jobId}`).emit("tracking:update", update);
-  });
+        customerLocation,
 
-  socket.on("job:update_status", (payload, callback) => {
-    const jobId = payload?.jobId;
-    const status = payload?.status;
+        customerAddress:
+          customerLocation?.address ||
+          payload?.customerAddress ||
+          "Current Location",
 
-    if (!jobId || !status) {
-      callback?.({ ok: false, error: "jobId and status required" });
-      return;
+        status: "searching",
+
+        paymentStatus:
+          payload?.paymentStatus ||
+          "paid",
+
+        quoteCents:
+          Number.isFinite(quoteCents) &&
+          quoteCents >= 50
+            ? Math.round(quoteCents)
+            : 6500,
+
+        createdAt:
+          new Date().toISOString(),
+      };
+
+      activeJobs.set(
+        jobId,
+        job
+      );
+
+      /*
+       * The customer who created the request becomes
+       * a member of this job's realtime room.
+       */
+      socket.join("customer");
+      socket.join(`job:${jobId}`);
+
+      console.log(
+        "[RoadShare Socket] job:create",
+        job
+      );
+
+      /*
+       * Only online helpers in the helper room receive
+       * the customer request.
+       */
+      io.to("helper").emit(
+        "job:available",
+        job
+      );
+
+      socket.emit(
+        "job:created",
+        job
+      );
+
+      callback?.({
+        ok: true,
+        id: jobId,
+        jobId,
+        job,
+      });
     }
+  );
 
-    const existing = activeJobs.get(jobId) || {};
+  /* =======================================================
+     ACCEPT JOB
+  ======================================================= */
 
-    const job = {
-      ...existing,
-      id: jobId,
-      jobId,
-      status,
-      etaMinutes: status === "arrived" ? 0 : existing.etaMinutes || 8,
-      paymentStatus: existing.paymentStatus || "paid",
-      helperProfile: existing.helperProfile || {
-        helperId: payload?.helperId || "7",
-        name: payload?.helperName || "RoadShare Helper",
-        phone: payload?.helperPhone || "",
-      },
-    };
+  socket.on(
+    "job:accept",
+    (
+      payload: any,
+      callback?: (response: any) => void
+    ) => {
+      const jobId =
+        payload?.jobId
+          ? String(payload.jobId)
+          : "";
 
-    activeJobs.set(jobId, job);
+      if (!jobId) {
+        callback?.({
+          ok: false,
+          error: "jobId required",
+        });
 
-    io.to(`job:${jobId}`).emit("job:status_updated", job);
+        return;
+      }
 
-    callback?.({ ok: true, job });
-  });
+      const existing =
+        activeJobs.get(jobId);
 
-  socket.on("disconnect", () => {
-    console.log("Socket disconnected:", socket.id);
-  });
+      if (!existing) {
+        callback?.({
+          ok: false,
+          error:
+            "Job was not found or is no longer available.",
+        });
+
+        return;
+      }
+
+      /*
+       * Prevent two helpers from accepting the same request.
+       */
+      if (
+        existing.status !== "searching"
+      ) {
+        callback?.({
+          ok: false,
+          error:
+            "This RoadShare request has already been accepted.",
+        });
+
+        return;
+      }
+
+      const acceptedJob: RoadShareJob = {
+        ...existing,
+
+        id: jobId,
+        jobId,
+
+        status: "accepted",
+
+        helperProfile: {
+          helperId:
+            payload?.helperId ||
+            socket.id,
+
+          name:
+            payload?.helperName ||
+            "RoadShare Helper",
+
+          phone:
+            payload?.helperPhone ||
+            "",
+
+          vehicle:
+            payload?.helperVehicle ||
+            "",
+        },
+
+        etaMinutes:
+          Number(payload?.etaMinutes) > 0
+            ? Number(payload.etaMinutes)
+            : 8,
+
+        updatedAt:
+          new Date().toISOString(),
+      };
+
+      activeJobs.set(
+        jobId,
+        acceptedJob
+      );
+
+      socket.join("helper");
+      socket.join(`job:${jobId}`);
+
+      console.log(
+        "[RoadShare Socket] job:accept",
+        acceptedJob
+      );
+
+      /*
+       * Customer + accepting helper both receive this.
+       */
+      io.to(`job:${jobId}`).emit(
+        "job:accepted",
+        acceptedJob
+      );
+
+      /*
+       * Remove the request from other helpers'
+       * available-job screens.
+       */
+      io.to("helper").emit(
+        "job:unavailable",
+        {
+          jobId,
+        }
+      );
+
+      callback?.({
+        ok: true,
+        job: acceptedJob,
+      });
+    }
+  );
+
+  /* =======================================================
+     HELPER LOCATION
+  ======================================================= */
+
+  socket.on(
+    "location:update",
+    (payload: any) => {
+      const jobId =
+        payload?.jobId
+          ? String(payload.jobId)
+          : "";
+
+      if (!jobId) return;
+
+      const latitude =
+        Number(
+          payload?.latitude ??
+          payload?.lat
+        );
+
+      const longitude =
+        Number(
+          payload?.longitude ??
+          payload?.lng
+        );
+
+      if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+      ) {
+        return;
+      }
+
+      const update = {
+        jobId,
+
+        helperUserId:
+          payload?.helperUserId ||
+          payload?.helperId ||
+          undefined,
+
+        latitude,
+        longitude,
+
+        lat: latitude,
+        lng: longitude,
+
+        heading:
+          Number(payload?.heading) || 0,
+
+        timestamp:
+          new Date().toISOString(),
+      };
+
+      console.log(
+        "[RoadShare Socket] location:update",
+        update
+      );
+
+      /*
+       * One canonical server event:
+       * tracking:update
+       */
+      io.to(`job:${jobId}`).emit(
+        "tracking:update",
+        update
+      );
+    }
+  );
+
+  /* =======================================================
+     JOB STATUS
+  ======================================================= */
+
+  socket.on(
+    "job:update_status",
+    (
+      payload: any,
+      callback?: (response: any) => void
+    ) => {
+      const jobId =
+        payload?.jobId
+          ? String(payload.jobId)
+          : "";
+
+      const status =
+        payload?.status
+          ? String(payload.status)
+          : "";
+
+      if (!jobId || !status) {
+        callback?.({
+          ok: false,
+          error:
+            "jobId and status required",
+        });
+
+        return;
+      }
+
+      const existing =
+        activeJobs.get(jobId);
+
+      if (!existing) {
+        callback?.({
+          ok: false,
+          error: "Job not found",
+        });
+
+        return;
+      }
+
+      const job: RoadShareJob = {
+        ...existing,
+
+        status,
+
+        etaMinutes:
+          status === "arrived"
+            ? 0
+            : Number(
+                payload?.etaMinutes ??
+                existing.etaMinutes ??
+                8
+              ),
+
+        updatedAt:
+          new Date().toISOString(),
+      };
+
+      activeJobs.set(
+        jobId,
+        job
+      );
+
+      console.log(
+        "[RoadShare Socket] job:update_status",
+        job
+      );
+
+      /*
+       * One canonical server event:
+       * job:status_updated
+       */
+      io.to(`job:${jobId}`).emit(
+        "job:status_updated",
+        job
+      );
+
+      callback?.({
+        ok: true,
+        job,
+      });
+    }
+  );
+
+  /* =======================================================
+     DISCONNECT
+  ======================================================= */
+
+  socket.on(
+    "disconnect",
+    (reason) => {
+      console.log(
+        "[RoadShare Socket] disconnected:",
+        socket.id,
+        reason
+      );
+    }
+  );
 });
 
-const PORT = Number(process.env.PORT) || 3000;
+/* =========================================================
+   START SERVER
+========================================================= */
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`RoadShare backend running with Socket.IO on http://0.0.0.0:${PORT}`);
-});
+const PORT =
+  Number(process.env.PORT) ||
+  3000;
 
+server.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `RoadShare backend running with Socket.IO on http://0.0.0.0:${PORT}`
+    );
+  }
+);

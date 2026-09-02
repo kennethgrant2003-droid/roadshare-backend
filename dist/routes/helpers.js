@@ -161,8 +161,8 @@ router.post("/:helperId/stripe/onboard", async (req, res) => {
         }
         const accountLink = await stripe.accountLinks.create({
             account: stripeAccountId,
-            refresh_url: "https://roadshare-backend.onrender.com/health",
-            return_url: "https://roadshare-backend.onrender.com/health",
+            refresh_url: "roadshare://helper-dashboard",
+            return_url: "roadshare://helper-dashboard",
             type: "account_onboarding",
         });
         res.json({

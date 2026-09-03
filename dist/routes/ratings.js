@@ -1,8 +1,24 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
+const db_1 = require("../db");
 const router = (0, express_1.Router)();
-const ratings = [];
+async function ensureRatingsTable() {
+    await (0, db_1.query)(`
+    CREATE TABLE IF NOT EXISTS ratings (
+      id BIGSERIAL PRIMARY KEY,
+      job_id TEXT NOT NULL UNIQUE,
+      helper_id TEXT NOT NULL,
+      rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+      review TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+    await (0, db_1.query)(`
+    CREATE INDEX IF NOT EXISTS idx_ratings_helper_id
+    ON ratings(helper_id)
+  `);
+}
 router.post("/submit", async (req, res) => {
     try {
         const jobId = String(req.body?.jobId || "").trim();
@@ -21,38 +37,61 @@ router.post("/submit", async (req, res) => {
                 error: "helperId is required",
             });
         }
-        if (!Number.isFinite(rating) ||
-            rating < 1 ||
-            rating > 5) {
+        if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
             return res.status(400).json({
                 ok: false,
-                error: "Rating must be between 1 and 5",
+                error: "Rating must be an integer between 1 and 5",
             });
         }
-        const duplicate = ratings.find((item) => item.jobId === jobId);
-        if (duplicate) {
+        await ensureRatingsTable();
+        const existing = await (0, db_1.query)(`
+      SELECT id
+      FROM ratings
+      WHERE job_id = $1
+      LIMIT 1
+      `, [jobId]);
+        if (existing.rowCount && existing.rowCount > 0) {
             return res.status(409).json({
                 ok: false,
                 error: "A rating has already been submitted for this job",
             });
         }
-        const record = {
+        await (0, db_1.query)(`
+      INSERT INTO ratings (
+        job_id,
+        helper_id,
+        rating,
+        review
+      )
+      VALUES ($1, $2, $3, $4)
+      `, [
             jobId,
             helperId,
             rating,
             review,
-            createdAt: new Date().toISOString(),
-        };
-        ratings.push(record);
-        const helperRatings = ratings.filter((item) => item.helperId === helperId);
-        const average = helperRatings.reduce((sum, item) => sum + item.rating, 0) / helperRatings.length;
-        const avgRating = Math.round(average * 10) / 10;
-        console.log("[RoadShare Ratings] submitted:", record);
+        ]);
+        const stats = await (0, db_1.query)(`
+      SELECT
+        ROUND(AVG(rating)::numeric, 1) AS avg_rating,
+        COUNT(*)::int AS rating_count
+      FROM ratings
+      WHERE helper_id = $1
+      `, [helperId]);
+        const avgRating = Number(stats.rows?.[0]?.avg_rating) || rating;
+        const ratingCount = Number(stats.rows?.[0]?.rating_count) || 1;
+        console.log("[RoadShare Ratings] submitted:", {
+            jobId,
+            helperId,
+            rating,
+            review,
+            avgRating,
+            ratingCount,
+        });
         return res.json({
             ok: true,
             rating,
             avgRating,
-            ratingCount: helperRatings.length,
+            ratingCount,
         });
     }
     catch (error) {
@@ -60,6 +99,38 @@ router.post("/submit", async (req, res) => {
         return res.status(500).json({
             ok: false,
             error: "Could not submit rating",
+        });
+    }
+});
+router.get("/helper/:helperId", async (req, res) => {
+    try {
+        const helperId = String(req.params.helperId || "").trim();
+        if (!helperId) {
+            return res.status(400).json({
+                ok: false,
+                error: "helperId is required",
+            });
+        }
+        await ensureRatingsTable();
+        const stats = await (0, db_1.query)(`
+      SELECT
+        ROUND(AVG(rating)::numeric, 1) AS avg_rating,
+        COUNT(*)::int AS rating_count
+      FROM ratings
+      WHERE helper_id = $1
+      `, [helperId]);
+        return res.json({
+            ok: true,
+            helperId,
+            avgRating: Number(stats.rows?.[0]?.avg_rating) || 0,
+            ratingCount: Number(stats.rows?.[0]?.rating_count) || 0,
+        });
+    }
+    catch (error) {
+        console.error("[RoadShare Ratings] helper stats error:", error);
+        return res.status(500).json({
+            ok: false,
+            error: "Could not load helper rating",
         });
     }
 });

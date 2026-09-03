@@ -11,6 +11,7 @@ const socket_io_1 = require("socket.io");
 const stripe_1 = __importDefault(require("./routes/stripe"));
 const helpers_1 = __importDefault(require("./routes/helpers"));
 const tracking_1 = __importDefault(require("./routes/tracking"));
+const ratings_1 = __importDefault(require("./routes/ratings"));
 const app = (0, express_1.default)();
 const server = http_1.default.createServer(app);
 const io = new socket_io_1.Server(server, {
@@ -37,8 +38,10 @@ app.get("/health", (_req, res) => {
 app.use("/api/stripe", stripe_1.default);
 app.use("/api/helpers", helpers_1.default);
 app.use("/api/tracking", tracking_1.default);
+app.use("/api/ratings", ratings_1.default);
 app.use("/helpers", helpers_1.default);
 app.use("/tracking", tracking_1.default);
+app.use("/ratings", ratings_1.default);
 app.get("/stripe/onboarding-return", (_req, res) => {
     res.send(`
     <html>

@@ -1,4 +1,4 @@
-import "dotenv/config";
+﻿import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import http from "http";
@@ -7,6 +7,7 @@ import { Server } from "socket.io";
 import stripeRoutes from "./routes/stripe";
 import helperRoutes from "./routes/helpers";
 import trackingRoutes from "./routes/tracking";
+import ratingRoutes from "./routes/ratings";
 
 const app = express();
 const server = http.createServer(app);
@@ -80,9 +81,11 @@ app.use("/api/stripe", stripeRoutes);
 
 app.use("/api/helpers", helperRoutes);
 app.use("/api/tracking", trackingRoutes);
+app.use("/api/ratings", ratingRoutes);
 
 app.use("/helpers", helperRoutes);
 app.use("/tracking", trackingRoutes);
+app.use("/ratings", ratingRoutes);
 
 app.get("/stripe/onboarding-return", (_req, res) => {
   res.send(`

@@ -1,24 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
-const db_1 = require("../db");
+const firebaseAdmin_1 = require("../firebaseAdmin");
 const router = (0, express_1.Router)();
-async function ensureRatingsTable() {
-    await (0, db_1.query)(`
-    CREATE TABLE IF NOT EXISTS ratings (
-      id BIGSERIAL PRIMARY KEY,
-      job_id TEXT NOT NULL UNIQUE,
-      helper_id TEXT NOT NULL,
-      rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
-      review TEXT NOT NULL DEFAULT '',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-    await (0, db_1.query)(`
-    CREATE INDEX IF NOT EXISTS idx_ratings_helper_id
-    ON ratings(helper_id)
-  `);
-}
 router.post("/submit", async (req, res) => {
     try {
         const jobId = String(req.body?.jobId || "").trim();
@@ -43,47 +27,44 @@ router.post("/submit", async (req, res) => {
                 error: "Rating must be an integer between 1 and 5",
             });
         }
-        await ensureRatingsTable();
-        const existing = await (0, db_1.query)(`
-      SELECT id
-      FROM ratings
-      WHERE job_id = $1
-      LIMIT 1
-      `, [jobId]);
-        if (existing.rowCount && existing.rowCount > 0) {
-            return res.status(409).json({
-                ok: false,
-                error: "A rating has already been submitted for this job",
+        const db = (0, firebaseAdmin_1.getFirestore)();
+        const ratingRef = db.collection("ratings").doc(jobId);
+        const statsRef = db.collection("helperRatings").doc(helperId);
+        let avgRating = rating;
+        let ratingCount = 1;
+        await db.runTransaction(async (transaction) => {
+            const existingRating = await transaction.get(ratingRef);
+            if (existingRating.exists) {
+                throw new Error("DUPLICATE_RATING");
+            }
+            const statsSnapshot = await transaction.get(statsRef);
+            const currentCount = Number(statsSnapshot.data()?.ratingCount || 0);
+            const currentTotal = Number(statsSnapshot.data()?.ratingTotal || 0);
+            ratingCount = currentCount + 1;
+            const ratingTotal = currentTotal + rating;
+            avgRating =
+                Math.round((ratingTotal / ratingCount) * 10) / 10;
+            transaction.set(ratingRef, {
+                jobId,
+                helperId,
+                rating,
+                review,
+                createdAt: new Date().toISOString(),
             });
-        }
-        await (0, db_1.query)(`
-      INSERT INTO ratings (
-        job_id,
-        helper_id,
-        rating,
-        review
-      )
-      VALUES ($1, $2, $3, $4)
-      `, [
+            transaction.set(statsRef, {
+                helperId,
+                ratingCount,
+                ratingTotal,
+                avgRating,
+                updatedAt: new Date().toISOString(),
+            }, {
+                merge: true,
+            });
+        });
+        console.log("[RoadShare Ratings] Firestore rating submitted:", {
             jobId,
             helperId,
             rating,
-            review,
-        ]);
-        const stats = await (0, db_1.query)(`
-      SELECT
-        ROUND(AVG(rating)::numeric, 1) AS avg_rating,
-        COUNT(*)::int AS rating_count
-      FROM ratings
-      WHERE helper_id = $1
-      `, [helperId]);
-        const avgRating = Number(stats.rows?.[0]?.avg_rating) || rating;
-        const ratingCount = Number(stats.rows?.[0]?.rating_count) || 1;
-        console.log("[RoadShare Ratings] submitted:", {
-            jobId,
-            helperId,
-            rating,
-            review,
             avgRating,
             ratingCount,
         });
@@ -95,7 +76,13 @@ router.post("/submit", async (req, res) => {
         });
     }
     catch (error) {
-        console.error("[RoadShare Ratings] error:", error);
+        if (error?.message === "DUPLICATE_RATING") {
+            return res.status(409).json({
+                ok: false,
+                error: "A rating has already been submitted for this job",
+            });
+        }
+        console.error("[RoadShare Ratings] Firestore error:", error);
         return res.status(500).json({
             ok: false,
             error: "Could not submit rating",
@@ -111,23 +98,21 @@ router.get("/helper/:helperId", async (req, res) => {
                 error: "helperId is required",
             });
         }
-        await ensureRatingsTable();
-        const stats = await (0, db_1.query)(`
-      SELECT
-        ROUND(AVG(rating)::numeric, 1) AS avg_rating,
-        COUNT(*)::int AS rating_count
-      FROM ratings
-      WHERE helper_id = $1
-      `, [helperId]);
+        const db = (0, firebaseAdmin_1.getFirestore)();
+        const snapshot = await db
+            .collection("helperRatings")
+            .doc(helperId)
+            .get();
+        const data = snapshot.data();
         return res.json({
             ok: true,
             helperId,
-            avgRating: Number(stats.rows?.[0]?.avg_rating) || 0,
-            ratingCount: Number(stats.rows?.[0]?.rating_count) || 0,
+            avgRating: Number(data?.avgRating || 0),
+            ratingCount: Number(data?.ratingCount || 0),
         });
     }
     catch (error) {
-        console.error("[RoadShare Ratings] helper stats error:", error);
+        console.error("[RoadShare Ratings] Firestore lookup error:", error);
         return res.status(500).json({
             ok: false,
             error: "Could not load helper rating",

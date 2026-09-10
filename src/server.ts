@@ -1,4 +1,5 @@
 import "dotenv/config";
+import Stripe from "stripe";
 
 import express from "express";
 import cors from "cors";
@@ -1084,3 +1085,4 @@ server.listen(
     );
   }
 );
+

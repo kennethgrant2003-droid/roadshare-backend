@@ -111,6 +111,42 @@ app.get(
   }
 );
 
+app.get(
+  "/debug/stripe-account",
+  async (_req, res) => {
+    try {
+      const secretKey =
+        process.env.STRIPE_SECRET_KEY;
+
+      if (!secretKey) {
+        return res.status(500).json({
+          ok: false,
+          error:
+            "Missing STRIPE_SECRET_KEY",
+        });
+      }
+
+      const stripe =
+        new Stripe(secretKey);
+
+      const account =
+        await stripe.accounts.retrieve();
+
+      return res.json({
+        ok: true,
+        stripeAccountId:
+          account.id,
+      });
+    } catch (error: any) {
+      return res.status(500).json({
+        ok: false,
+        error:
+          error?.message ||
+          "Stripe diagnostic failed",
+      });
+    }
+  }
+);
 app.use(
   "/api/stripe",
   stripeRoutes
@@ -1085,4 +1121,5 @@ server.listen(
     );
   }
 );
+
 

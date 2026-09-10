@@ -1,4 +1,4 @@
-﻿import {
+import {
   cert,
   getApp,
   getApps,
@@ -8,6 +8,10 @@
 import {
   getFirestore as getAdminFirestore,
 } from "firebase-admin/firestore";
+
+import {
+  getAuth as getAdminAuth,
+} from "firebase-admin/auth";
 
 function getFirebaseApp() {
   if (getApps().length > 0) {
@@ -46,7 +50,13 @@ function getFirebaseApp() {
 }
 
 export function getFirestore() {
-  const app = getFirebaseApp();
+  return getAdminFirestore(
+    getFirebaseApp()
+  );
+}
 
-  return getAdminFirestore(app);
+export function getFirebaseAuth() {
+  return getAdminAuth(
+    getFirebaseApp()
+  );
 }

@@ -1,5 +1,4 @@
 import "dotenv/config";
-import Stripe from "stripe";
 
 import express from "express";
 import cors from "cors";
@@ -111,102 +110,6 @@ app.get(
   }
 );
 
-app.get(
-  "/debug/stripe-account",
-  async (_req, res) => {
-    try {
-      const secretKey =
-        process.env.ROADSHARE_STRIPE_SECRET_KEY;
-
-      if (!secretKey) {
-        return res.status(500).json({
-          ok: false,
-          error:
-            "Missing ROADSHARE_STRIPE_SECRET_KEY",
-        });
-      }
-
-      const stripe =
-        new Stripe(secretKey);
-
-      const account =
-        await stripe.accounts.retrieve();
-
-      return res.json({
-        ok: true,
-        stripeAccountId:
-          account.id,
-      });
-    } catch (error: any) {
-      return res.status(500).json({
-        ok: false,
-        error:
-          error?.message ||
-          "Stripe diagnostic failed",
-      });
-    }
-  }
-);
-app.get(
-  "/debug/runtime-env-source",
-  async (_req, res) => {
-    const fs = require("fs");
-    const path = require("path");
-
-    const cwd = process.cwd();
-    const rootEnv = path.join(cwd, ".env");
-    const etcSecrets = "/etc/secrets";
-
-    return res.json({
-      ok: true,
-      cwd,
-      rootEnvExists: fs.existsSync(rootEnv),
-      etcSecretsExists: fs.existsSync(etcSecrets),
-      secretFiles: fs.existsSync(etcSecrets)
-        ? fs.readdirSync(etcSecrets)
-        : [],
-      stripeEnvPresent:
-        Boolean(process.env.ROADSHARE_STRIPE_SECRET_KEY),
-    });
-  }
-);
-app.get(
-  "/debug/stripe-source-detail",
-  async (_req, res) => {
-    const fs = require("fs");
-
-    const relevantEnvNames =
-      Object.keys(process.env)
-        .filter((name) =>
-          /STRIPE|DOTENV|SECRET/i.test(name)
-        )
-        .sort();
-
-    let secretFiles: string[] = [];
-    let secretDataFiles: string[] = [];
-
-    try {
-      if (fs.existsSync("/etc/secrets")) {
-        secretFiles =
-          fs.readdirSync("/etc/secrets");
-      }
-
-      if (fs.existsSync("/etc/secrets/..data")) {
-        secretDataFiles =
-          fs.readdirSync("/etc/secrets/..data");
-      }
-    } catch {}
-
-    return res.json({
-      ok: true,
-      relevantEnvNames,
-      secretFiles,
-      secretDataFiles,
-      dotenvConfigPathPresent:
-        Boolean(process.env.DOTENV_CONFIG_PATH),
-    });
-  }
-);
 app.use(
   "/api/stripe",
   stripeRoutes
@@ -1181,6 +1084,7 @@ server.listen(
     );
   }
 );
+
 
 
 

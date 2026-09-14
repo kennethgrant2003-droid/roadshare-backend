@@ -5,7 +5,7 @@ import Stripe from "stripe";
 import { query } from "../db";
 
 const router = express.Router();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
+const stripe = new Stripe(process.env.ROADSHARE_STRIPE_SECRET_KEY as string);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -321,5 +321,6 @@ router.post("/:helperId/profile-picture", upload.single("profilePicture"), async
 });
 
 export default router;
+
 
 

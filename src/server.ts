@@ -116,13 +116,13 @@ app.get(
   async (_req, res) => {
     try {
       const secretKey =
-        process.env.STRIPE_SECRET_KEY;
+        process.env.ROADSHARE_STRIPE_SECRET_KEY;
 
       if (!secretKey) {
         return res.status(500).json({
           ok: false,
           error:
-            "Missing STRIPE_SECRET_KEY",
+            "Missing ROADSHARE_STRIPE_SECRET_KEY",
         });
       }
 
@@ -166,7 +166,7 @@ app.get(
         ? fs.readdirSync(etcSecrets)
         : [],
       stripeEnvPresent:
-        Boolean(process.env.STRIPE_SECRET_KEY),
+        Boolean(process.env.ROADSHARE_STRIPE_SECRET_KEY),
     });
   }
 );
@@ -1181,6 +1181,7 @@ server.listen(
     );
   }
 );
+
 
 
 

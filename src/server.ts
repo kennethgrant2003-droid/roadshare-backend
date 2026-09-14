@@ -147,6 +147,29 @@ app.get(
     }
   }
 );
+app.get(
+  "/debug/runtime-env-source",
+  async (_req, res) => {
+    const fs = require("fs");
+    const path = require("path");
+
+    const cwd = process.cwd();
+    const rootEnv = path.join(cwd, ".env");
+    const etcSecrets = "/etc/secrets";
+
+    return res.json({
+      ok: true,
+      cwd,
+      rootEnvExists: fs.existsSync(rootEnv),
+      etcSecretsExists: fs.existsSync(etcSecrets),
+      secretFiles: fs.existsSync(etcSecrets)
+        ? fs.readdirSync(etcSecrets)
+        : [],
+      stripeEnvPresent:
+        Boolean(process.env.STRIPE_SECRET_KEY),
+    });
+  }
+);
 app.use(
   "/api/stripe",
   stripeRoutes
@@ -1121,5 +1144,6 @@ server.listen(
     );
   }
 );
+
 
 

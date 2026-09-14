@@ -170,6 +170,43 @@ app.get(
     });
   }
 );
+app.get(
+  "/debug/stripe-source-detail",
+  async (_req, res) => {
+    const fs = require("fs");
+
+    const relevantEnvNames =
+      Object.keys(process.env)
+        .filter((name) =>
+          /STRIPE|DOTENV|SECRET/i.test(name)
+        )
+        .sort();
+
+    let secretFiles: string[] = [];
+    let secretDataFiles: string[] = [];
+
+    try {
+      if (fs.existsSync("/etc/secrets")) {
+        secretFiles =
+          fs.readdirSync("/etc/secrets");
+      }
+
+      if (fs.existsSync("/etc/secrets/..data")) {
+        secretDataFiles =
+          fs.readdirSync("/etc/secrets/..data");
+      }
+    } catch {}
+
+    return res.json({
+      ok: true,
+      relevantEnvNames,
+      secretFiles,
+      secretDataFiles,
+      dotenvConfigPathPresent:
+        Boolean(process.env.DOTENV_CONFIG_PATH),
+    });
+  }
+);
 app.use(
   "/api/stripe",
   stripeRoutes
@@ -1144,6 +1181,7 @@ server.listen(
     );
   }
 );
+
 
 
 

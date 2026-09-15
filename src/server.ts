@@ -12,6 +12,7 @@ import stripeRoutes from "./routes/stripe";
 import helperRoutes from "./routes/helpers";
 import trackingRoutes from "./routes/tracking";
 import ratingRoutes from "./routes/ratings";
+import verificationRoutes from "./routes/verification";
 
 import {
   getFirestore,
@@ -128,6 +129,11 @@ app.use(
 app.use(
   "/api/ratings",
   ratingRoutes
+);
+
+app.use(
+  "/api/verification",
+  verificationRoutes
 );
 
 app.use(

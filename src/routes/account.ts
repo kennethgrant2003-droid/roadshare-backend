@@ -106,13 +106,16 @@ router.delete(
             .trim()
             .toLowerCase();
       } catch {
-        // Continue using the verified
-        // token email if available.
+        /*
+         * Continue using the verified
+         * token email if available.
+         */
       }
 
       /*
-       * Financial and transaction records
-       * are intentionally NOT deleted:
+       * Financial, transaction, service,
+       * and historical records are
+       * intentionally NOT deleted:
        *
        * helperPayouts
        * roadshareJobs
@@ -126,55 +129,88 @@ router.delete(
        */
 
       /*
-       * Clean the legacy PostgreSQL helper
-       * record BEFORE deleting Firebase
-       * authentication.
+       * RoadShare previously stored helper
+       * accounts in a legacy PostgreSQL
+       * database.
+       *
+       * Attempt to anonymize a matching
+       * legacy helper record when that
+       * database is available.
+       *
+       * The current RoadShare identity
+       * system is Firebase. Therefore an
+       * unavailable retired legacy database
+       * must not prevent a user from deleting
+       * their current RoadShare account.
        */
       if (email) {
         try {
-          await query(
-            `
-            UPDATE helpers
-            SET
-              name = $1,
-              email = $2,
-              phone = $3,
-              password = $4,
-              vehicle_type = $5,
-              profile_photo_url = $6,
-              socket_id = $7
-            WHERE LOWER(email) = LOWER($8)
-            `,
-            [
-              "Deleted RoadShare Helper",
-              `deleted_${uid}@deleted.roadshare`,
-              "",
-              "",
-              "",
-              "",
-              `deleted_${uid}`,
-              email,
-            ]
+          const legacyResult =
+            await query(
+              `
+              UPDATE helpers
+              SET
+                name = $1,
+                email = $2,
+                phone = $3,
+                password = $4,
+                vehicle_type = $5,
+                profile_photo_url = $6,
+                socket_id = $7
+              WHERE LOWER(email) = LOWER($8)
+              `,
+              [
+                "Deleted RoadShare Helper",
+                `deleted_${uid}@deleted.roadshare`,
+                "",
+                "",
+                "",
+                "",
+                `deleted_${uid}`,
+                email,
+              ]
+            );
+
+          console.log(
+            "[RoadShare Account] Legacy helper cleanup completed:",
+            {
+              uid,
+              rows:
+                legacyResult.rowCount,
+            }
           );
         } catch (legacyError) {
-          console.error(
-            "[RoadShare Account] Legacy helper cleanup failed:",
-            legacyError
-          );
-
-          return res
-            .status(500)
-            .json({
-              ok: false,
+          /*
+           * Legacy PostgreSQL is no longer
+           * authoritative for RoadShare
+           * authentication.
+           *
+           * Log the failure for maintenance,
+           * but continue deleting the active
+           * Firebase account.
+           */
+          console.warn(
+            "[RoadShare Account] Legacy helper cleanup unavailable; continuing Firebase deletion:",
+            {
+              uid,
               error:
-                "Account cleanup could not be completed.",
-            });
+                legacyError instanceof Error
+                  ? legacyError.message
+                  : String(
+                      legacyError
+                    ),
+            }
+          );
         }
       }
 
       /*
-       * Remove Firebase personal/profile
-       * records.
+       * Remove current Firebase personal
+       * and profile records.
+       *
+       * This intentionally does not delete
+       * financial or historical records
+       * listed above.
        */
       const batch =
         db.batch();
@@ -205,6 +241,10 @@ router.delete(
 
       /*
        * Delete Firebase Authentication LAST.
+       *
+       * This prevents removal of the login
+       * identity before the active Firebase
+       * profile cleanup has succeeded.
        */
       await auth.deleteUser(uid);
 

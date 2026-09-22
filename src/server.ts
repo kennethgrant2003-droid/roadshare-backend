@@ -14,9 +14,11 @@ import trackingRoutes from "./routes/tracking";
 import ratingRoutes from "./routes/ratings";
 import verificationRoutes from "./routes/verification";
 import accountRoutes from "./routes/account";
+import jobsRoutes from "./routes/jobs";
 
 import {
   getFirestore,
+  getFirebaseAuth,
 } from "./firebaseAdmin";
 
 import {
@@ -49,6 +51,7 @@ type RoadShareJob = {
   note: string;
 
   customerName: string;
+  customerId: string;
 
   customerLocation: {
     latitude?: number;
@@ -139,6 +142,11 @@ app.use(
 app.use(
   "/api/account",
   accountRoutes
+);
+
+app.use(
+  "/api/jobs",
+  jobsRoutes
 );
 
 app.use(
@@ -420,6 +428,73 @@ io.on(
           const jobId =
             `job_${Date.now()}`;
 
+          const firebaseToken =
+            String(
+              payload
+                ?.firebaseToken ||
+              ""
+            ).trim();
+
+          if (!firebaseToken) {
+            callback?.({
+              ok: false,
+              error:
+                "Customer authentication is required before dispatch.",
+            });
+
+            return;
+          }
+
+          const decodedCustomer =
+            await getFirebaseAuth()
+              .verifyIdToken(
+                firebaseToken
+              );
+
+          const customerId =
+            String(
+              decodedCustomer.uid ||
+              ""
+            ).trim();
+
+          if (!customerId) {
+            callback?.({
+              ok: false,
+              error:
+                "RoadShare could not verify the customer account.",
+            });
+
+            return;
+          }
+
+          const customerUserSnapshot =
+            await getFirestore()
+              .collection("users")
+              .doc(customerId)
+              .get();
+
+          const customerRole =
+            String(
+              customerUserSnapshot
+                .data()
+                ?.role ||
+              ""
+            )
+              .trim()
+              .toLowerCase();
+
+          if (
+            customerRole !==
+            "customer"
+          ) {
+            callback?.({
+              ok: false,
+              error:
+                "A customer account is required to request RoadShare service.",
+            });
+
+            return;
+          }
           const quoteCents =
             Number(
               payload
@@ -517,6 +592,8 @@ io.on(
                 payload
                   ?.customerName ||
                 "Customer",
+
+              customerId,
 
               customerLocation,
 

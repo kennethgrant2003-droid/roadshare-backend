@@ -255,4 +255,37 @@ router.get(
   }
 );
 
+router.get("/customer/history", async (req: Request, res: Response) => {
+  try {
+    const customer = await getAuthenticatedCustomer(req);
+    const snapshot = await getFirestore().collection("roadshareJobs")
+      .where("customerId", "==", customer.uid).get();
+    const jobs = snapshot.docs.map((doc): Record<string, any> => ({ ...doc.data(), jobId: doc.id }))
+      .sort((a, b) => Date.parse(String(b.createdAt || "")) - Date.parse(String(a.createdAt || "")))
+      .slice(0, 100);
+    return res.json({ ok: true, jobs });
+  } catch (error: any) {
+    return res.status(Number(error?.statusCode || 401)).json({ ok: false, error: "Could not load customer history." });
+  }
+});
+
+router.get("/helper/active", async (req: Request, res: Response) => {
+  try {
+    const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    if (!token || token === req.headers.authorization) return res.status(401).json({ ok: false, error: "Helper login required." });
+    const decoded = await getFirebaseAuth().verifyIdToken(token);
+    const db = getFirestore();
+    const user = await db.collection("users").doc(decoded.uid).get();
+    if (user.data()?.role !== "helper") return res.status(403).json({ ok: false, error: "Helper account required." });
+    const snapshot = await db.collection("roadshareJobs").where("helperId", "==", decoded.uid).get();
+    const active = snapshot.docs.map((doc): Record<string, any> => ({ ...doc.data(), jobId: doc.id }))
+      .filter((job) => ["accepted", "assigned", "enroute", "en_route", "arrived", "in_progress"].includes(String(job.status)))
+      .sort((a, b) => Date.parse(String(b.updatedAt || b.createdAt || "")) - Date.parse(String(a.updatedAt || a.createdAt || "")));
+    return res.json({ ok: true, activeJob: active[0] || null });
+  } catch (error) {
+    console.error("[RoadShare] helper recovery failed:", error);
+    return res.status(401).json({ ok: false, error: "Could not verify helper session." });
+  }
+});
+
 export default router;

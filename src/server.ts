@@ -3,14 +3,13 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import http from "http";
+import { randomUUID } from "crypto";
 
 import {
   Server,
 } from "socket.io";
 
 import stripeRoutes from "./routes/stripe";
-import helperRoutes from "./routes/helpers";
-import trackingRoutes from "./routes/tracking";
 import ratingRoutes from "./routes/ratings";
 import verificationRoutes from "./routes/verification";
 import accountRoutes from "./routes/account";
@@ -24,6 +23,7 @@ import {
 import {
   verifyRoadSharePayment,
 } from "./services/roadsharePayments";
+import { getQuotedService } from "./services/pricing";
 
 const app =
   express();
@@ -75,6 +75,8 @@ type RoadShareJob = {
     vehicle?: string;
   };
 
+  helperLocation?: { latitude: number; longitude: number; updatedAt: string };
+
   etaMinutes?: number;
 
   createdAt: string;
@@ -86,6 +88,36 @@ const activeJobs =
     string,
     RoadShareJob
   >();
+const lastLocationSave = new Map<string, number>();
+
+// Rooms and mutating socket events must use the verified Firebase identity.
+io.use(async (socket, next) => {
+  try {
+    const token = String(socket.handshake.auth?.token || "");
+    if (!token) throw new Error("Authentication required");
+    const decoded = await getFirebaseAuth().verifyIdToken(token);
+    const user = await getFirestore().collection("users").doc(decoded.uid).get();
+    const role = String(user.data()?.role || "").toLowerCase();
+    if (!["customer", "helper", "admin"].includes(role)) {
+      throw new Error("RoadShare account role required");
+    }
+    socket.data.uid = decoded.uid;
+    socket.data.role = role;
+    next();
+  } catch {
+    next(new Error("RoadShare sign-in required"));
+  }
+});
+
+async function loadJob(jobId: string): Promise<RoadShareJob | null> {
+  const cached = activeJobs.get(jobId);
+  if (cached) return cached;
+  const snapshot = await getFirestore().collection("roadshareJobs").doc(jobId).get();
+  if (!snapshot.exists) return null;
+  const job = snapshot.data() as RoadShareJob;
+  if (job) activeJobs.set(jobId, job);
+  return job || null;
+}
 
 /* =========================================================
    EXPRESS
@@ -121,16 +153,6 @@ app.use(
 );
 
 app.use(
-  "/api/helpers",
-  helperRoutes
-);
-
-app.use(
-  "/api/tracking",
-  trackingRoutes
-);
-
-app.use(
   "/api/ratings",
   ratingRoutes
 );
@@ -147,16 +169,6 @@ app.use(
 app.use(
   "/api/jobs",
   jobsRoutes
-);
-
-app.use(
-  "/helpers",
-  helperRoutes
-);
-
-app.use(
-  "/tracking",
-  trackingRoutes
 );
 
 app.use(
@@ -246,170 +258,62 @@ io.on(
        USER JOIN
     ===================================================== */
 
-    socket.on(
-      "user:join",
-      (
-        payload: any,
-        callback?:
-          (
-            response: any
-          ) => void
-      ) => {
-        const role =
-          String(
-            payload?.role ||
-              "unknown"
-          )
-            .trim()
-            .toLowerCase();
-
-        const userId =
-          payload?.userId
-            ? String(
-                payload.userId
-              )
-            : undefined;
-
-        const jobId =
-          payload?.jobId
-            ? String(
-                payload.jobId
-              )
-            : undefined;
-
-        socket.join(
-          role
-        );
-
-        if (userId) {
-          socket.join(
-            `user:${userId}`
-          );
-        }
-
-        if (jobId) {
-          socket.join(
-            `job:${jobId}`
-          );
-        }
-
-        console.log(
-          "[RoadShare Socket] user:join",
-          {
-            socketId:
-              socket.id,
-            role,
-            userId,
-            jobId,
+    socket.on("user:join", async (payload: any, callback?: (response: any) => void) => {
+      try {
+        const { uid, role } = socket.data as { uid: string; role: string };
+        if (payload?.role && payload.role !== role) throw new Error("Invalid account role");
+        if (payload?.userId && payload.userId !== uid) throw new Error("Invalid account ID");
+        if (role === "helper") {
+          const helperUser = await getFirestore().collection("users").doc(uid).get();
+          if (String(helperUser.data()?.verification_status || "").toLowerCase() !== "approved") {
+            throw new Error("Helper verification required.");
           }
-        );
-
-        callback?.({
-          ok: true,
-          socketId:
-            socket.id,
-          role,
-          userId,
-          jobId,
-        });
-
-        if (
-          role ===
-          "helper"
-        ) {
-          const jobs =
-            Array.from(
-              activeJobs.values()
-            ).filter(
-              (job) =>
-                job.status ===
-                "searching"
-            );
-
-          jobs.forEach(
-            (job) => {
-              socket.emit(
-                "job:available",
-                job
-              );
-            }
-          );
         }
+        socket.join(role);
+        socket.join(`user:${uid}`);
+        if (payload?.jobId) {
+          const jobId = String(payload.jobId);
+          const job = await loadJob(jobId);
+          if (!job || (role !== "admin" && job.customerId !== uid && job.helperProfile?.helperId !== uid)) {
+            throw new Error("This job is not assigned to your account");
+          }
+          socket.join(`job:${jobId}`);
+        }
+        callback?.({ ok: true, role, userId: uid });
+        if (role === "helper") {
+          const waiting = await getFirestore().collection("roadshareJobs")
+            .where("status", "==", "searching").get();
+          waiting.docs.forEach((doc) => socket.emit("job:available", doc.data()));
+        }
+      } catch (error: any) {
+        callback?.({ ok: false, error: error.message });
       }
-    );
+    });
 
     /* =====================================================
        JOB ROOM JOIN / LEAVE
     ===================================================== */
 
-    socket.on(
-      "job:join",
-      (
-        payload: any,
-        callback?:
-          (
-            response: any
-          ) => void
-      ) => {
-        const jobId =
-          payload?.jobId
-            ? String(
-                payload.jobId
-              )
-            : "";
-
-        if (!jobId) {
-          callback?.({
-            ok: false,
-            error:
-              "jobId required",
-          });
-
-          return;
+    socket.on("job:join", async (payload: any, callback?: (response: any) => void) => {
+      try {
+        const jobId = String(payload?.jobId || "");
+        if (!jobId) throw new Error("jobId required");
+        const job = await loadJob(jobId);
+        const { uid, role } = socket.data as { uid: string; role: string };
+        if (!job || (role !== "admin" && job.customerId !== uid && job.helperProfile?.helperId !== uid)) {
+          throw new Error("This job is not assigned to your account");
         }
-
-        socket.join(
-          `job:${jobId}`
-        );
-
-        console.log(
-          "[RoadShare Socket] joined room:",
-          `job:${jobId}`
-        );
-
-        callback?.({
-          ok: true,
-          jobId,
-        });
+        socket.join(`job:${jobId}`);
+        callback?.({ ok: true, jobId });
+      } catch (error: any) {
+        callback?.({ ok: false, error: error.message });
       }
-    );
+    });
 
-    socket.on(
-      "job:leave",
-      (
-        payload: any
-      ) => {
-        const jobId =
-          payload?.jobId
-            ? String(
-                payload.jobId
-              )
-            : "";
-
-        if (!jobId) {
-          return;
-        }
-
-        socket.leave(
-          `job:${jobId}`
-        );
-
-        console.log(
-          "[RoadShare Socket] left room:",
-          `job:${jobId}`
-        );
-      }
-    );
+    socket.on("job:leave", (payload: any) => {
+      const jobId = String(payload?.jobId || "");
+      if (jobId) socket.leave(`job:${jobId}`);
+    });
 
     /* =====================================================
        CREATE PAID JOB
@@ -425,8 +329,7 @@ io.on(
           ) => void
       ) => {
         try {
-          const jobId =
-            `job_${Date.now()}`;
+          const jobId = `job_${randomUUID()}`;
 
           const firebaseToken =
             String(
@@ -464,6 +367,11 @@ io.on(
                 "RoadShare could not verify the customer account.",
             });
 
+            return;
+          }
+
+          if (socket.data.role !== "customer" || socket.data.uid !== customerId) {
+            callback?.({ ok: false, error: "Sign in as the customer who paid for this request." });
             return;
           }
 
@@ -521,6 +429,11 @@ io.on(
             Math.round(
               quoteCents
             );
+          const serviceQuote = getQuotedService(payload?.serviceType);
+          if (!serviceQuote || finalQuote !== serviceQuote.amountCents) {
+            callback?.({ ok: false, error: "The paid amount does not match this RoadShare service." });
+            return;
+          }
 
           const paymentStatus =
             String(
@@ -555,10 +468,24 @@ io.on(
            * Never trust the phone saying "paid".
            * Stripe itself must confirm the PaymentIntent.
            */
-          await verifyRoadSharePayment(
+          const verifiedPayment = await verifyRoadSharePayment(
             paymentIntentId,
-            finalQuote
+            finalQuote,
+            customerId
           );
+          if (verifiedPayment.metadata?.serviceType !== serviceQuote.serviceType) {
+            throw new Error("Stripe payment service does not match the requested job.");
+          }
+
+          const db = getFirestore();
+          const prior = await db.collection("roadshareJobs")
+            .where("paymentIntentId", "==", paymentIntentId).limit(1).get();
+          if (!prior.empty) {
+            const oldJob = prior.docs[0].data() as RoadShareJob;
+            if (oldJob.customerId !== customerId) throw new Error("This payment belongs to another request.");
+            callback?.({ ok: true, id: oldJob.id, jobId: oldJob.jobId, job: oldJob });
+            return;
+          }
 
           const customerLocation =
             payload
@@ -574,9 +501,7 @@ io.on(
               jobId,
 
               serviceType:
-                payload
-                  ?.serviceType ||
-                "Roadside Assistance",
+                serviceQuote.serviceType,
 
               vehicleType:
                 payload
@@ -624,20 +549,15 @@ io.on(
            * Persist the payment/job relationship.
            * This survives a Render restart.
            */
-          await getFirestore()
-            .collection(
-              "roadshareJobs"
-            )
-            .doc(jobId)
-            .set({
-              ...job,
-
-              helperId:
-                null,
-
-              payoutStatus:
-                "not_started",
+          await db.runTransaction(async (transaction) => {
+            const reservation = db.collection("paymentDispatches").doc(paymentIntentId);
+            const claim = await transaction.get(reservation);
+            if (claim.exists) throw new Error("This payment has already been dispatched. Reopen your active request.");
+            transaction.create(reservation, { customerId, jobId, createdAt: job.createdAt });
+            transaction.create(db.collection("roadshareJobs").doc(jobId), {
+              ...job, helperId: null, payoutStatus: "not_started",
             });
+          });
 
           activeJobs.set(
             jobId,
@@ -711,6 +631,7 @@ io.on(
             response: any
           ) => void
       ) => {
+        try {
         const jobId =
           payload?.jobId
             ? String(
@@ -728,10 +649,12 @@ io.on(
           return;
         }
 
-        const existing =
-          activeJobs.get(
-            jobId
-          );
+        if (socket.data.role !== "helper" || payload?.helperId !== socket.data.uid) {
+          callback?.({ ok: false, error: "An authenticated helper account is required." });
+          return;
+        }
+
+        const existing = await loadJob(jobId);
 
         if (!existing) {
           callback?.({
@@ -756,12 +679,7 @@ io.on(
           return;
         }
 
-        const helperId =
-          String(
-            payload
-              ?.helperId ||
-              ""
-          ).trim();
+        const helperId = socket.data.uid as string;
 
         if (!helperId) {
           callback?.({
@@ -770,6 +688,26 @@ io.on(
               "Helper ID is required.",
           });
 
+          return;
+        }
+
+        const assigned = await getFirestore().collection("roadshareJobs")
+          .where("helperId", "==", helperId).get();
+        if (assigned.docs.some((doc) => doc.id !== jobId &&
+          ["accepted", "assigned", "enroute", "en_route", "arrived", "in_progress"].includes(String(doc.data().status)))) {
+          callback?.({ ok: false, error: "Complete your current job before accepting another." });
+          return;
+        }
+
+        const helperUser = await getFirestore().collection("users").doc(helperId).get();
+        if (String(helperUser.data()?.verification_status || "").toLowerCase() !== "approved") {
+          callback?.({ ok: false, error: "Helper verification is required before accepting jobs." });
+          return;
+        }
+        const helperProfile = await getFirestore().collection("helperProfiles").doc(helperId).get();
+        const profile = helperProfile.data() || {};
+        if (!profile.name || !profile.phone || !profile.vehicle) {
+          callback?.({ ok: false, error: "Complete your helper profile before accepting jobs." });
           return;
         }
 
@@ -787,20 +725,11 @@ io.on(
             helperProfile: {
               helperId,
 
-              name:
-                payload
-                  ?.helperName ||
-                "RoadShare Helper",
+              name: String(profile.name),
 
-              phone:
-                payload
-                  ?.helperPhone ||
-                "",
+              phone: String(profile.phone),
 
-              vehicle:
-                payload
-                  ?.helperVehicle ||
-                "",
+              vehicle: String(profile.vehicle),
             },
 
             etaMinutes:
@@ -820,12 +749,12 @@ io.on(
           };
 
         try {
-          await getFirestore()
-            .collection(
-              "roadshareJobs"
-            )
-            .doc(jobId)
-            .set(
+          const db = getFirestore();
+          await db.runTransaction(async (transaction) => {
+            const ref = db.collection("roadshareJobs").doc(jobId);
+            const latest = await transaction.get(ref);
+            if (latest.data()?.status !== "searching") throw new Error("This request was already accepted.");
+            transaction.set(ref,
               {
                 status:
                   "accepted",
@@ -848,6 +777,7 @@ io.on(
                 merge: true,
               }
             );
+          });
         } catch (
           error: any
         ) {
@@ -906,6 +836,10 @@ io.on(
           job:
             acceptedJob,
         });
+        } catch (error) {
+          console.error("[RoadShare] helper acceptance failed:", error);
+          callback?.({ ok: false, error: "Could not accept this job. Please retry." });
+        }
       }
     );
 
@@ -915,7 +849,7 @@ io.on(
 
     socket.on(
       "location:update",
-      (
+      async (
         payload: any
       ) => {
         const jobId =
@@ -928,6 +862,12 @@ io.on(
         if (!jobId) {
           return;
         }
+
+        try {
+          const job = await loadJob(jobId);
+          if (socket.data.role !== "helper" || job?.helperProfile?.helperId !== socket.data.uid ||
+            ["completed", "cancelled"].includes(job.status)) return;
+        } catch { return; }
 
         const latitude =
           Number(
@@ -946,6 +886,7 @@ io.on(
           );
 
         if (
+          Math.abs(latitude) > 90 || Math.abs(longitude) > 180 ||
           !Number.isFinite(
             latitude
           ) ||
@@ -959,12 +900,7 @@ io.on(
         const update = {
           jobId,
 
-          helperUserId:
-            payload
-              ?.helperUserId ||
-            payload
-              ?.helperId ||
-            undefined,
+          helperUserId: socket.data.uid,
 
           latitude,
           longitude,
@@ -994,6 +930,16 @@ io.on(
             "tracking:update",
             update
           );
+
+        if (Date.now() - (lastLocationSave.get(jobId) || 0) >= 15000) {
+          lastLocationSave.set(jobId, Date.now());
+          getFirestore().collection("roadshareJobs").doc(jobId).set({
+            helperLocation: { latitude, longitude, updatedAt: update.timestamp },
+          }, { merge: true }).catch((error) => {
+            lastLocationSave.delete(jobId);
+            console.error("[RoadShare] helper location save failed:", error);
+          });
+        }
       }
     );
 
@@ -1010,6 +956,7 @@ io.on(
             response: any
           ) => void
       ) => {
+        try {
         const jobId =
           payload?.jobId
             ? String(
@@ -1037,10 +984,7 @@ io.on(
           return;
         }
 
-        const existing =
-          activeJobs.get(
-            jobId
-          );
+        const existing = await loadJob(jobId);
 
         if (!existing) {
           callback?.({
@@ -1049,6 +993,30 @@ io.on(
               "Job not found",
           });
 
+          return;
+        }
+
+        if (socket.data.role !== "helper" || existing.helperProfile?.helperId !== socket.data.uid) {
+          callback?.({ ok: false, error: "This job is not assigned to your helper account." });
+          return;
+        }
+
+        const allowed: Record<string, string[]> = {
+          accepted: ["enroute", "en_route", "arrived", "in_progress"],
+          enroute: ["arrived", "in_progress"],
+          en_route: ["arrived", "in_progress"],
+          arrived: ["in_progress"],
+          in_progress: [],
+        };
+        // Completion requires the authenticated Stripe payout endpoint.
+        if (status === "completed") {
+          const paid = await getFirestore().collection("roadshareJobs").doc(jobId).get();
+          if (paid.data()?.status !== "completed") {
+            callback?.({ ok: false, error: "Finish this job through the payout flow." });
+            return;
+          }
+        } else if (!allowed[existing.status]?.includes(status)) {
+          callback?.({ ok: false, error: "Invalid job status change." });
           return;
         }
 
@@ -1076,11 +1044,6 @@ io.on(
                 .toISOString(),
           };
 
-        activeJobs.set(
-          jobId,
-          job
-        );
-
         /*
          * Status changes remain realtime UI events.
          * They DO NOT create Stripe transfers.
@@ -1105,14 +1068,13 @@ io.on(
                 merge: true,
               }
             );
-        } catch (
-          error
-        ) {
-          console.log(
-            "[RoadShare] status persistence warning:",
-            error
-          );
+        } catch (error) {
+          console.error("[RoadShare] status persistence failed:", error);
+          callback?.({ ok: false, error: "Could not save job status." });
+          return;
         }
+
+        activeJobs.set(jobId, job);
 
         console.log(
           "[RoadShare Socket] job:update_status",
@@ -1132,6 +1094,10 @@ io.on(
           ok: true,
           job,
         });
+        } catch (error) {
+          console.error("[RoadShare] job status update failed:", error);
+          callback?.({ ok: false, error: "Could not update this job. Please retry." });
+        }
       }
     );
 
@@ -1172,9 +1138,3 @@ server.listen(
     );
   }
 );
-
-
-
-
-
-

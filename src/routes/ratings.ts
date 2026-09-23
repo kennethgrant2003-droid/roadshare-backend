@@ -1,10 +1,13 @@
 ﻿import { Router } from "express";
-import { getFirestore } from "../firebaseAdmin";
+import { getFirestore, getFirebaseAuth } from "../firebaseAdmin";
 
 const router = Router();
 
 router.post("/submit", async (req, res) => {
   try {
+    const authorization = String(req.headers.authorization || "");
+    if (!authorization.startsWith("Bearer ")) return res.status(401).json({ ok: false, error: "Sign in to rate your helper." });
+    const decoded = await getFirebaseAuth().verifyIdToken(authorization.slice(7));
     const jobId = String(req.body?.jobId || "").trim();
     const helperId = String(req.body?.helperId || "").trim();
     const rating = Number(req.body?.rating);
@@ -35,11 +38,17 @@ router.post("/submit", async (req, res) => {
 
     const ratingRef = db.collection("ratings").doc(jobId);
     const statsRef = db.collection("helperRatings").doc(helperId);
+    const jobRef = db.collection("roadshareJobs").doc(jobId);
 
     let avgRating = rating;
     let ratingCount = 1;
 
     await db.runTransaction(async (transaction) => {
+      const job = await transaction.get(jobRef);
+      const assignment = job.data();
+      if (assignment?.customerId !== decoded.uid || assignment?.helperId !== helperId || assignment?.status !== "completed") {
+        throw new Error("RATING_NOT_ALLOWED");
+      }
       const existingRating = await transaction.get(ratingRef);
 
       if (existingRating.exists) {
@@ -98,6 +107,7 @@ router.post("/submit", async (req, res) => {
       ratingCount,
     });
   } catch (error: any) {
+    if (error?.message === "RATING_NOT_ALLOWED") return res.status(403).json({ ok: false, error: "Only the customer can rate a completed job." });
     if (error?.message === "DUPLICATE_RATING") {
       return res.status(409).json({
         ok: false,

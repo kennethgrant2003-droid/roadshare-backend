@@ -10,6 +10,7 @@ import {
   getStripe,
   verifyRoadSharePayment,
 } from "../services/roadsharePayments";
+import { getQuotedService } from "../services/pricing";
 
 const router =
   express.Router();
@@ -145,6 +146,13 @@ async function createPaymentIntent(
   res: express.Response
 ) {
   try {
+    const token = getBearerToken(req);
+    if (!token) return res.status(401).json({ error: "Customer sign-in required." });
+    const decoded = await getFirebaseAuth().verifyIdToken(token);
+    const user = await getFirestore().collection("users").doc(decoded.uid).get();
+    if (user.data()?.role !== "customer") {
+      return res.status(403).json({ error: "A customer account is required to pay for a job." });
+    }
     const stripe =
       getStripe();
 
@@ -155,6 +163,11 @@ async function createPaymentIntent(
 
     const amountCents =
       Number(rawAmount);
+
+    const quote = getQuotedService(req.body?.serviceType);
+    if (!quote || amountCents !== quote.amountCents) {
+      return res.status(400).json({ error: "The amount does not match RoadShare's service price. Custom quotes need manual review." });
+    }
 
     if (
       !Number.isFinite(
@@ -207,6 +220,7 @@ async function createPaymentIntent(
           metadata: {
             app:
               "RoadShare",
+            customerUid: decoded.uid,
 
             paymentType:
               String(
@@ -216,11 +230,7 @@ async function createPaymentIntent(
               ),
 
             serviceType:
-              String(
-                req.body
-                  ?.serviceType ||
-                  "Roadside Assistance"
-              ),
+              quote.serviceType,
           },
         });
 
@@ -719,7 +729,8 @@ router.post(
           paymentIntentId,
           Math.round(
             quoteCents
-          )
+          ),
+          String(job.customerId || "") || undefined
         );
 
       const payoutSnapshot =

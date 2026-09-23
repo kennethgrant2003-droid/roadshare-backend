@@ -15,7 +15,8 @@ export function getStripe() {
 
 export async function verifyRoadSharePayment(
   paymentIntentId: string,
-  expectedAmountCents: number
+  expectedAmountCents: number,
+  expectedCustomerId?: string
 ) {
   if (!paymentIntentId) {
     throw new Error(
@@ -38,6 +39,10 @@ export async function verifyRoadSharePayment(
     throw new Error(
       "Payment does not belong to RoadShare."
     );
+  }
+
+  if (expectedCustomerId && paymentIntent.metadata?.customerUid !== expectedCustomerId) {
+    throw new Error("Stripe payment does not belong to this customer.");
   }
 
   if (

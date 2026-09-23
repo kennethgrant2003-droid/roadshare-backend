@@ -14,6 +14,7 @@ import ratingRoutes from "./routes/ratings";
 import verificationRoutes from "./routes/verification";
 import accountRoutes from "./routes/account";
 import jobsRoutes from "./routes/jobs";
+import chatRoutes from "./routes/chat";
 
 import {
   getFirestore,
@@ -168,6 +169,7 @@ app.use(
 
 app.use(
   "/api/jobs",
+  chatRoutes(io),
   jobsRoutes
 );
 

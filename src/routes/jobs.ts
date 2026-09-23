@@ -269,6 +269,32 @@ router.get("/customer/history", async (req: Request, res: Response) => {
   }
 });
 
+router.get("/helper/earnings", async (req: Request, res: Response) => {
+  try {
+    const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    if (!token || token === req.headers.authorization) return res.status(401).json({ ok: false, error: "Helper login required." });
+    const decoded = await getFirebaseAuth().verifyIdToken(token);
+    const db = getFirestore();
+    const user = await db.collection("users").doc(decoded.uid).get();
+    if (user.data()?.role !== "helper") return res.status(403).json({ ok: false, error: "Helper account required." });
+    const snapshot = await db.collection("roadshareJobs").where("payoutHelperId", "==", decoded.uid).get();
+    const earnings = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
+      .filter((job: Record<string, any>) => job.payoutStatus === "paid" &&
+        Number.isSafeInteger(job.helperPayoutCents) && job.helperPayoutCents > 0)
+      .map((job: Record<string, any>) => ({
+        id: job.id,
+        serviceType: String(job.serviceType || "Roadside Assistance"),
+        payoutCents: job.helperPayoutCents as number,
+        completedAt: String(job.completedAt || job.updatedAt || job.createdAt || ""),
+      }))
+      .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt));
+    return res.json({ ok: true, earnings });
+  } catch (error) {
+    console.error("[RoadShare] helper earnings failed:", error);
+    return res.status(500).json({ ok: false, error: "Could not load helper earnings. Please retry." });
+  }
+});
+
 router.get("/helper/active", async (req: Request, res: Response) => {
   try {
     const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
